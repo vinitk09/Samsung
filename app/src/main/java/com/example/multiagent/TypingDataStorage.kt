@@ -6,15 +6,15 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.io.File
 
-class TouchDataStorage(private val context: Context) {
-    private val tag = "TouchDataStorage"
-    private val fileName = "touch_events.json"
+class TypingDataStorage(private val context: Context) {
+    private val tag = "TypingDataStorage"
+    private val fileName = "typing_events.json"
     private val gson = Gson()
     private val maxEvents = 1000
 
-    fun saveTouchEvent(event: TouchEvent) {
+    fun saveTypingEvent(event: TypingEvent) {
         try {
-            val allEvents = loadAllTouchEvents().toMutableList()
+            val allEvents = loadAllTypingEvents().toMutableList()
             allEvents.add(event)
             val eventsToSave = if (allEvents.size > maxEvents) {
                 allEvents.takeLast(maxEvents)
@@ -22,21 +22,22 @@ class TouchDataStorage(private val context: Context) {
                 allEvents
             }
             val jsonString = gson.toJson(eventsToSave)
-            File(context.filesDir, fileName).writeText(jsonString)
+            val file = File(context.filesDir, fileName)
+            file.writeText(jsonString)
         } catch (e: Exception) {
-            Log.e(tag, "Error saving touch event: ${e.message}")
+            Log.e(tag, "Error saving typing event: ${e.message}")
         }
     }
 
-    fun loadAllTouchEvents(): List<TouchEvent> {
+    fun loadAllTypingEvents(): List<TypingEvent> {
         return try {
             val file = File(context.filesDir, fileName)
             if (!file.exists()) return emptyList()
             val jsonString = file.readText()
-            val type = object : TypeToken<List<TouchEvent>>() {}.type
+            val type = object : TypeToken<List<TypingEvent>>() {}.type
             gson.fromJson(jsonString, type) ?: emptyList()
         } catch (e: Exception) {
-            Log.e(tag, "Error loading touch events: ${e.message}")
+            Log.e(tag, "Error loading typing events: ${e.message}")
             emptyList()
         }
     }

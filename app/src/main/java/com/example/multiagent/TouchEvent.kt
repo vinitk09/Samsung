@@ -1,3 +1,4 @@
+// TouchEvent.kt
 package com.example.multiagent
 
 data class TouchEvent(
@@ -6,5 +7,6 @@ data class TouchEvent(
     val y: Float,
     val pressure: Float,
     val action: Int,
-    val eventTime: Long
+    val eventTime: Long,
+    val source: Int // NEW: To differentiate between touchscreen, mouse, etc.
 )

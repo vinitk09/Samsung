@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">MultiAgent</string>
+    <string name="accessibility_service_description">This service captures typing dynamics to learn user behavior. It is required for the Typing Agent to function.</string>
+
 </resources>
