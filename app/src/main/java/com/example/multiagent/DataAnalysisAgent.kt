@@ -4,39 +4,30 @@ import android.content.Context
 import android.util.Log
 import android.view.InputDevice
 import android.view.MotionEvent
+import com.example.multiagent.agents.MovementEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.pow
 import kotlin.math.sqrt
 
-/**
- * Represents the learned behavioral profile of the user.
- * Includes metrics for Keyboard, Touchscreen, and Mouse.
- */
+// UserProfile data class is unchanged
 data class UserProfile(
-    // Typing Metrics
     val averageLatency: Double = 0.0,
     val latencyStdDev: Double = 0.0,
     val typingSpeedWPM: Int = 0,
-    // Touchscreen Metrics
     val averagePressure: Float = 0.0f,
     val pressureStdDev: Float = 0.0f,
-    val averageSwipeSpeed: Double = 0.0, // pixels per millisecond
+    val averageSwipeSpeed: Double = 0.0,
     val swipeSpeedStdDev: Double = 0.0,
-    // Mouse Metrics
-    val averageClickLatency: Double = 0.0, // Time button is held down
-    val clickLatencyStdDev: Double = 0.0,
-    // State
+    val averageMovement: Double = 0.0,
+    val movementStdDev: Double = 0.0,
     val isBaselineEstablished: Boolean = false
 )
 
-/**
- * The core agent that performs learning, detection, and reaction
- * for keyboard, touchscreen, and mouse inputs.
- */
 class DataAnalysisAgent(context: Context) {
     // --- Data Storage and State ---
     private val typingStorage = TypingDataStorage(context)
@@ -44,15 +35,17 @@ class DataAnalysisAgent(context: Context) {
     private val recentLatencies = mutableListOf<Long>()
     private val recentPressures = mutableListOf<Float>()
     private val recentSwipeSpeeds = mutableListOf<Double>()
-    private val recentClickLatencies = mutableListOf<Long>()
+    private val recentMovements = mutableListOf<Double>()
     private val maxDataPoints = 200
-    private val minDataPointsForBaseline = 50
+    private val minDataPointsForBaseline = 75
 
-    // --- State for Tracking Gestures ---
+    private val shortTermLatencies = mutableListOf<Long>()
+    private val shortTermBufferSize = 10
+
     private var swipeStartEvent: TouchEvent? = null
-    private var mouseDownEvent: TouchEvent? = null
-
     private val _userProfile = MutableStateFlow(UserProfile())
+
+    // --- FIX IS HERE: Corrected the typo from _user_profile to _userProfile ---
     val userProfile = _userProfile.asStateFlow()
 
     init {
@@ -68,9 +61,12 @@ class DataAnalysisAgent(context: Context) {
 
     @Subscribe
     fun onTypingEvent(event: TypingEvent) {
-        typingStorage.saveTypingEvent(event)
         if (recentLatencies.size >= maxDataPoints) recentLatencies.removeAt(0)
         recentLatencies.add(event.interKeyLatency)
+
+        if (shortTermLatencies.size >= shortTermBufferSize) shortTermLatencies.removeAt(0)
+        shortTermLatencies.add(event.interKeyLatency)
+
         recalculateProfile()
         if (_userProfile.value.isBaselineEstablished) {
             checkForTypingAnomalies(event)
@@ -79,14 +75,24 @@ class DataAnalysisAgent(context: Context) {
 
     @Subscribe
     fun onTouchEvent(event: TouchEvent) {
-        // Route the event to the correct handler based on its source
-        when (event.source) {
-            InputDevice.SOURCE_TOUCHSCREEN -> handleTouchEvent(event)
-            InputDevice.SOURCE_MOUSE -> handleMouseEvent(event)
+        if (event.source == InputDevice.SOURCE_TOUCHSCREEN) {
+            handleTouchEvent(event)
         }
     }
 
-    // --- Logic for FINGER actions on the touchscreen ---
+    @Subscribe
+    fun onMovementEvent(event: MovementEvent) {
+        val magnitude = sqrt(event.accX.toDouble().pow(2) + event.accY.toDouble().pow(2) + event.accZ.toDouble().pow(2))
+        if (magnitude > 10.5 || magnitude < 9.0) {
+            if (recentMovements.size >= maxDataPoints) recentMovements.removeAt(0)
+            recentMovements.add(magnitude)
+            recalculateProfile()
+            if (_userProfile.value.isBaselineEstablished) {
+                checkForMovementAnomalies(magnitude)
+            }
+        }
+    }
+
     private fun handleTouchEvent(event: TouchEvent) {
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
@@ -107,37 +113,12 @@ class DataAnalysisAgent(context: Context) {
         }
     }
 
-    // --- Logic for MOUSE actions ---
-    private fun handleMouseEvent(event: TouchEvent) {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> {
-                mouseDownEvent = event
-            }
-            MotionEvent.ACTION_UP -> {
-                mouseDownEvent?.let { startEvent ->
-                    val clickLatency = event.eventTime - startEvent.eventTime
-                    if (clickLatency > 0) {
-                        if (recentClickLatencies.size >= maxDataPoints) recentClickLatencies.removeAt(0)
-                        recentClickLatencies.add(clickLatency)
-                        recalculateProfile()
-                        if (_userProfile.value.isBaselineEstablished) {
-                            checkForMouseAnomalies(clickLatency)
-                        }
-                    }
-                    mouseDownEvent = null
-                }
-            }
-        }
-    }
-
     private fun processSwipe(startEvent: TouchEvent, endEvent: TouchEvent) {
         val duration = (endEvent.eventTime - startEvent.eventTime).toDouble()
-        if (duration < 50) return // Ignore simple taps
-
+        if (duration < 50) return
         val deltaX = (endEvent.x - startEvent.x).toDouble()
         val deltaY = (endEvent.y - startEvent.y).toDouble()
         val distance = hypot(deltaX, deltaY)
-
         if (distance > 0 && duration > 0) {
             val speed = distance / duration
             if (recentSwipeSpeeds.size >= maxDataPoints) recentSwipeSpeeds.removeAt(0)
@@ -158,9 +139,14 @@ class DataAnalysisAgent(context: Context) {
         val pressureStdDev = calculateStdDevFloat(recentPressures, avgPressure)
         val avgSwipeSpeed = recentSwipeSpeeds.average()
         val swipeSpeedStdDev = calculateStdDev(recentSwipeSpeeds, avgSwipeSpeed)
+        val avgMovement = recentMovements.average()
+        val movementStdDev = calculateStdDev(recentMovements, avgMovement)
 
-        val avgClickLatency = recentClickLatencies.average()
-        val clickLatencyStdDev = calculateStdDev(recentClickLatencies.map { it.toDouble() }, avgClickLatency)
+        val typingBaselineMet = recentLatencies.size >= minDataPointsForBaseline
+        val touchBaselineMet = recentPressures.size >= minDataPointsForBaseline
+        val movementBaselineMet = recentMovements.size >= minDataPointsForBaseline
+        val conditionsMet = listOf(typingBaselineMet, touchBaselineMet, movementBaselineMet).count { it }
+        val isEstablished = conditionsMet >= 2
 
         _userProfile.value = UserProfile(
             averageLatency = avgLatency,
@@ -170,21 +156,42 @@ class DataAnalysisAgent(context: Context) {
             pressureStdDev = pressureStdDev,
             averageSwipeSpeed = avgSwipeSpeed,
             swipeSpeedStdDev = swipeSpeedStdDev,
-            averageClickLatency = avgClickLatency,
-            clickLatencyStdDev = clickLatencyStdDev,
-            isBaselineEstablished = recentLatencies.size >= minDataPointsForBaseline && recentPressures.size >= minDataPointsForBaseline
+            averageMovement = avgMovement,
+            movementStdDev = movementStdDev,
+            isBaselineEstablished = isEstablished
         )
     }
 
     private fun checkForTypingAnomalies(event: TypingEvent) {
         val profile = _userProfile.value
         val latency = event.interKeyLatency
-        if (latency > 10 && latency < 40 && profile.latencyStdDev < 5) {
-            postAnomaly("Bot-like typing detected (too consistent)", AnomalySeverity.HIGH)
+
+        if (latency < 40) {
+            postAnomaly("Bot-like typing detected (inhuman programmatic speed)", AnomalySeverity.HIGH)
             return
         }
+
+        if (shortTermLatencies.size == shortTermBufferSize) {
+            val shortTermAverage = shortTermLatencies.average()
+            val shortTermStdDev = calculateStdDev(shortTermLatencies.map { it.toDouble() }, shortTermAverage)
+            val shortTermWPM = if (shortTermAverage > 0) ((60 * 1000) / (shortTermAverage * 5)).toInt() else 0
+            val speedDifference = abs(shortTermWPM - profile.typingSpeedWPM)
+
+            if (profile.typingSpeedWPM > 0 && speedDifference > profile.typingSpeedWPM * 0.5) {
+                postAnomaly("Typing speed is significantly different from user profile", AnomalySeverity.MEDIUM)
+                shortTermLatencies.clear()
+                return
+            }
+
+            if (shortTermAverage < profile.averageLatency * 0.7 && shortTermStdDev < profile.latencyStdDev * 0.7) {
+                postAnomaly("Unusual burst of rhythmic typing detected", AnomalySeverity.MEDIUM)
+                shortTermLatencies.clear()
+                return
+            }
+        }
+
         val deviation = abs(latency - profile.averageLatency)
-        val deviationThreshold = profile.latencyStdDev * 3.5
+        val deviationThreshold = profile.latencyStdDev * 4.0
         if (deviation > deviationThreshold && profile.latencyStdDev > 0) {
             postAnomaly("Typing rhythm is highly unusual", AnomalySeverity.MEDIUM)
         }
@@ -198,7 +205,7 @@ class DataAnalysisAgent(context: Context) {
             return
         }
         val deviation = abs(pressure - profile.averagePressure)
-        val deviationThreshold = profile.pressureStdDev * 4.0f
+        val deviationThreshold = profile.pressureStdDev * 4.5f
         if (deviation > deviationThreshold && profile.pressureStdDev > 0) {
             postAnomaly("Touch pressure is highly unusual", AnomalySeverity.LOW)
         }
@@ -217,16 +224,12 @@ class DataAnalysisAgent(context: Context) {
         }
     }
 
-    private fun checkForMouseAnomalies(clickLatency: Long) {
+    private fun checkForMovementAnomalies(currentMagnitude: Double) {
         val profile = _userProfile.value
-        if (clickLatency < 10) {
-            postAnomaly("Bot-like mouse click detected (inhuman speed)", AnomalySeverity.HIGH)
-            return
-        }
-        val deviation = abs(clickLatency - profile.averageClickLatency)
-        val deviationThreshold = profile.clickLatencyStdDev * 3.5
-        if (deviation > deviationThreshold && profile.clickLatencyStdDev > 0) {
-            postAnomaly("Mouse click speed is highly unusual", AnomalySeverity.MEDIUM)
+        val deviation = abs(currentMagnitude - profile.averageMovement)
+        val deviationThreshold = profile.movementStdDev * 5.0
+        if (deviation > deviationThreshold && profile.movementStdDev > 0) {
+            postAnomaly("Sudden, high-intensity device movement detected", AnomalySeverity.MEDIUM)
         }
     }
 

@@ -1,12 +1,12 @@
 package com.example.multiagent
 
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,20 +28,42 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.multiagent.agents.AnomalyDetectionAgent
+import com.example.multiagent.agents.AnomalyScoreEvent
+import com.example.multiagent.agents.AppUsageAgent
+import com.example.multiagent.agents.AppUsageEvent
+import com.example.multiagent.agents.MovementAgent
+import com.example.multiagent.agents.MovementEvent
 import com.example.multiagent.ui.theme.MultiAgentTheme
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
 
 class MainActivity : ComponentActivity() {
+    // Agent Declarations
     private lateinit var touchAgent: TouchAgent
     private lateinit var analysisAgent: DataAnalysisAgent
+    private lateinit var appUsageAgent: AppUsageAgent
+    private lateinit var movementAgent: MovementAgent
+    private lateinit var anomalyDetectionAgent: AnomalyDetectionAgent
+
+    // ANOMALY SCORE THRESHOLD (Response Logic)
+    private val anomalyThreshold = 0.015f
+
+    // Permission State
     private var hasOverlayPermission by mutableStateOf(false)
     private var isAccessibilityEnabled by mutableStateOf(false)
+    private var hasUsageStatsPermission by mutableStateOf(false)
+
+    // Event Count State
     private var touchCount by mutableStateOf(0)
     private var typingCount by mutableStateOf(0)
+    private var appUsageEventCount by mutableStateOf(0)
+    private var movementEventCount by mutableStateOf(0)
     private var lastAnomaly by mutableStateOf<AnomalyEvent?>(null)
+    private var lastForegroundApp by mutableStateOf("No data yet")
 
+    // EventBus Subscribers
     @Subscribe
     fun onTouchEvent(event: TouchEvent) {
         runOnUiThread { touchCount++ }
@@ -53,19 +75,37 @@ class MainActivity : ComponentActivity() {
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
-    fun onAnomalyEvent(event: AnomalyEvent) {
-        lastAnomaly = event
+    fun onAnomalyScoreEvent(event: AnomalyScoreEvent) {
+        if (event.score > anomalyThreshold) {
+            val reason = "ML Model Detected Anomaly (Score: %.4f)".format(event.score)
+            lastAnomaly = AnomalyEvent(reason, AnomalySeverity.HIGH)
+        }
+    }
+
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    fun onAppUsageEvent(event: AppUsageEvent) {
+        appUsageEventCount++
+        lastForegroundApp = event.packageName.substringAfterLast('.')
+    }
+
+    @Subscribe
+    fun onMovementEvent(event: MovementEvent) {
+        runOnUiThread { movementEventCount++ }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
         EventBus.getDefault().register(this)
+        // Instantiate all agents
         analysisAgent = DataAnalysisAgent(this)
+        appUsageAgent = AppUsageAgent(this)
+        movementAgent = MovementAgent(this)
+        anomalyDetectionAgent = AnomalyDetectionAgent(this)
+
         updatePermissionsStatus()
-        if (hasOverlayPermission) {
-            startTouchAgent()
-        }
+
         setContent {
             MultiAgentTheme {
                 val userProfile by analysisAgent.userProfile.collectAsState()
@@ -74,77 +114,91 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier.padding(innerPadding),
                         hasOverlayPermission = hasOverlayPermission,
                         isAccessibilityEnabled = isAccessibilityEnabled,
+                        hasUsagePermission = hasUsageStatsPermission,
                         touchCount = touchCount,
                         typingCount = typingCount,
+                        appUsageCount = appUsageEventCount,
+                        movementCount = movementEventCount,
+                        lastForegroundApp = lastForegroundApp,
                         userProfile = userProfile,
                         lastAnomaly = lastAnomaly,
                         onRequestOverlayPermission = { requestOverlayPermission() },
-                        onEnableAccessibility = {
-                            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                        }
+                        onEnableAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                        onRequestUsagePermission = { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
                     )
                 }
             }
         }
     }
 
-    private fun startTouchAgent() {
-        if (!::touchAgent.isInitialized) {
-            touchAgent = TouchAgent(this)
+    private fun startAllAgents() {
+        if (hasOverlayPermission) {
+            if (!::touchAgent.isInitialized) {
+                touchAgent = TouchAgent(this)
+            }
             touchAgent.start()
         }
+        if (hasUsageStatsPermission) {
+            appUsageAgent.start()
+        }
+        movementAgent.start()
     }
 
-    private fun requestOverlayPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            packageName?.let { pkg ->
-                val intent = Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$pkg")
-                )
-                startActivity(intent)
-            }
-        }
-    }
-
-    private fun isAccessibilityServiceEnabled(context: Context): Boolean {
-        val service = "${packageName}/${MasAccessibilityService::class.java.canonicalName}"
-        try {
-            val settingValue = Settings.Secure.getString(
-                context.applicationContext.contentResolver,
-                Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-            )
-            return settingValue?.contains(service, ignoreCase = true) ?: false
-        } catch (e: Settings.SettingNotFoundException) {
-            Log.e("MainActivity", "Could not find accessibility settings.", e)
-            return false
-        }
-    }
-
-    private fun updatePermissionsStatus() {
-        hasOverlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Settings.canDrawOverlays(this)
-        } else {
-            true
-        }
-        isAccessibilityEnabled = isAccessibilityServiceEnabled(this)
+    private fun stopAllAgents() {
+        if (::touchAgent.isInitialized) touchAgent.stop()
+        if (::appUsageAgent.isInitialized) appUsageAgent.stop()
+        if (::movementAgent.isInitialized) movementAgent.stop()
     }
 
     override fun onResume() {
         super.onResume()
         updatePermissionsStatus()
-        if (hasOverlayPermission && (!::touchAgent.isInitialized || !touchAgent.isRunning())) {
-            startTouchAgent()
-        }
+        startAllAgents()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopAllAgents()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         EventBus.getDefault().unregister(this)
         analysisAgent.unregister()
-        if (::touchAgent.isInitialized) {
-            touchAgent.stop()
+        anomalyDetectionAgent.unregister()
+    }
+
+    private fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            startActivity(intent)
         }
+    }
+
+    private fun isAccessibilityServiceEnabled(): Boolean {
+        val service = "${packageName}/${MasAccessibilityService::class.java.canonicalName}"
+        try {
+            val settingValue = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
+            return settingValue?.contains(service, ignoreCase = true) ?: false
+        } catch (e: Settings.SettingNotFoundException) {
+            return false
+        }
+    }
+
+    private fun hasUsageStatsPermission(): Boolean {
+        val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+        } else {
+            appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
+        }
+        return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    private fun updatePermissionsStatus() {
+        hasOverlayPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(this) else true
+        isAccessibilityEnabled = isAccessibilityServiceEnabled()
+        hasUsageStatsPermission = hasUsageStatsPermission()
     }
 }
 
@@ -153,12 +207,17 @@ fun AgentDashboard(
     modifier: Modifier = Modifier,
     hasOverlayPermission: Boolean,
     isAccessibilityEnabled: Boolean,
+    hasUsagePermission: Boolean,
     touchCount: Int,
     typingCount: Int,
+    appUsageCount: Int,
+    movementCount: Int,
+    lastForegroundApp: String,
     userProfile: UserProfile,
     lastAnomaly: AnomalyEvent?,
     onRequestOverlayPermission: () -> Unit,
-    onEnableAccessibility: () -> Unit
+    onEnableAccessibility: () -> Unit,
+    onRequestUsagePermission: () -> Unit
 ) {
     Column(
         modifier = modifier
@@ -176,7 +235,25 @@ fun AgentDashboard(
         UserProfileCard(userProfile)
         Spacer(Modifier.height(16.dp))
         AgentStatusCard(
-            agentName = "Touch & Mouse Agent",
+            agentName = "Movement Agent",
+            isPermissionGranted = true,
+            eventCount = movementCount,
+            permissionText = "This agent uses device sensors to detect physical movement and orientation.",
+            onGrantPermission = {}
+        )
+        Spacer(Modifier.height(16.dp))
+        AgentStatusCard(
+            agentName = "App Usage Agent",
+            isPermissionGranted = hasUsagePermission,
+            eventCount = appUsageCount,
+            eventDetail = "In Foreground: $lastForegroundApp",
+            permissionText = "This agent requires 'Usage Access' permission to identify which app is currently in use.",
+            onGrantPermission = onRequestUsagePermission,
+            permissionButtonText = "Grant Usage Permission"
+        )
+        Spacer(Modifier.height(16.dp))
+        AgentStatusCard(
+            agentName = "Touch Agent",
             isPermissionGranted = hasOverlayPermission,
             eventCount = touchCount,
             permissionText = "This agent requires the 'draw over other apps' permission to capture screen-wide events.",
@@ -253,20 +330,17 @@ fun UserProfileCard(profile: UserProfile) {
                 )
             }
             Spacer(Modifier.height(16.dp))
-            // --- Keyboard Metrics ---
             Text("Keyboard Biometrics", style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth())
             ProfileRow("Avg. Typing Latency:", "%.1f ms".format(profile.averageLatency))
             ProfileRow("Typing Rhythm Consistency:", "±%.1f ms".format(profile.latencyStdDev))
             Spacer(Modifier.height(12.dp))
-            // --- Touchscreen Metrics ---
             Text("Touchscreen Biometrics", style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth())
             ProfileRow("Avg. Touch Pressure:", "%.2f".format(profile.averagePressure))
             ProfileRow("Avg. Swipe Speed:", "%.1f px/ms".format(profile.averageSwipeSpeed))
             Spacer(Modifier.height(12.dp))
-            // --- Mouse Metrics ---
-            Text("Mouse Biometrics", style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth())
-            ProfileRow("Avg. Click Duration:", "%.1f ms".format(profile.averageClickLatency))
-            ProfileRow("Click Consistency:", "±%.1f ms".format(profile.clickLatencyStdDev))
+            Text("Movement Biometrics", style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth())
+            ProfileRow("Avg. Device Movement:", "%.2f".format(profile.averageMovement))
+            ProfileRow("Movement Consistency:", "±%.2f".format(profile.movementStdDev))
         }
     }
 }
@@ -291,7 +365,8 @@ fun AgentStatusCard(
     eventCount: Int,
     permissionText: String,
     onGrantPermission: () -> Unit,
-    permissionButtonText: String
+    permissionButtonText: String? = null,
+    eventDetail: String? = null
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -304,6 +379,13 @@ fun AgentStatusCard(
                 Text("Status: RUNNING", color = Color(0xFF4CAF50), fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(4.dp))
                 Text("Events Captured: $eventCount")
+                if (eventDetail != null) {
+                    Text(
+                        text = eventDetail,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                }
             } else {
                 Text("Status: PERMISSION NEEDED", color = Color(0xFFF44336), fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
@@ -313,9 +395,11 @@ fun AgentStatusCard(
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(horizontal = 8.dp)
                 )
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = onGrantPermission) {
-                    Text(permissionButtonText)
+                if (permissionButtonText != null) {
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = onGrantPermission) {
+                        Text(permissionButtonText)
+                    }
                 }
             }
         }
