@@ -3,7 +3,8 @@ package com.example.multiagent.agents
 import android.content.Context
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
-
+import com.example.multiagent.AnomalyEvent
+import com.example.multiagent.AnomalySeverity
 /**
  * AnomalyDetectionAgent.kt
  *

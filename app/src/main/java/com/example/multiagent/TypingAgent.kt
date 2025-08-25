@@ -4,6 +4,7 @@ import android.view.accessibility.AccessibilityEvent
 import org.greenrobot.eventbus.EventBus
 
 class TypingEvent(val interKeyLatency: Long)
+//class TypingEvent(val interKeyLatency: Long)
 
 class TypingAgent {
     private var lastKeyEventTimestamp: Long = 0

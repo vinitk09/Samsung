@@ -44,8 +44,6 @@ class DataAnalysisAgent(context: Context) {
 
     private var swipeStartEvent: TouchEvent? = null
     private val _userProfile = MutableStateFlow(UserProfile())
-
-    // --- FIX IS HERE: Corrected the typo from _user_profile to _userProfile ---
     val userProfile = _userProfile.asStateFlow()
 
     init {
@@ -192,8 +190,15 @@ class DataAnalysisAgent(context: Context) {
 
         val deviation = abs(latency - profile.averageLatency)
         val deviationThreshold = profile.latencyStdDev * 4.0
+
+        // --- NEW RULE ADDED HERE ---
+        // This rule specifically checks for very slow key presses.
+        val absoluteSlowThreshold = profile.averageLatency + 700 // e.g., 700ms slower than average
+
         if (deviation > deviationThreshold && profile.latencyStdDev > 0) {
             postAnomaly("Typing rhythm is highly unusual", AnomalySeverity.MEDIUM)
+        } else if (latency > absoluteSlowThreshold && profile.averageLatency > 0) {
+            postAnomaly("Unusually long pause detected between keys", AnomalySeverity.LOW)
         }
     }
 

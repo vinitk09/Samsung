@@ -36,6 +36,7 @@ android {
     }
     buildFeatures {
         compose = true
+        mlModelBinding = true
     }
 }
 
@@ -54,6 +55,8 @@ dependencies {
     // Add EventBus dependency directly
     implementation("org.greenrobot:eventbus:3.3.1")
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("androidx.compose.material:material-icons-extended-android:1.6.8")
+    implementation(libs.tensorflow.lite.metadata)
 
 
     testImplementation(libs.junit)

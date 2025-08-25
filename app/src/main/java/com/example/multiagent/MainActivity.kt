@@ -18,6 +18,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -35,9 +36,88 @@ import com.example.multiagent.agents.AppUsageEvent
 import com.example.multiagent.agents.MovementAgent
 import com.example.multiagent.agents.MovementEvent
 import com.example.multiagent.ui.theme.MultiAgentTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import java.util.concurrent.TimeUnit
+
+// Typing Pattern Detector class
+class TypingPatternDetector {
+    private var lastTypingTime: Long = 0
+    private var consistentTypingStartTime: Long = 0
+    private var isConsistentTyping = false
+    private var consecutiveTypingCount = 0
+
+    // Thresholds in milliseconds
+    private val consistentTypingThreshold = 60000L // 1 minute
+    private val pauseThreshold = 2000L // 2 seconds
+    private val maxPauseThreshold = 3000L // 3 seconds
+    private val typingIntervalThreshold = 1000L // 1 second between keystrokes for consistent typing
+
+    fun processTypingEvent(currentTime: Long = System.currentTimeMillis()): Boolean {
+        val timeSinceLastType = currentTime - lastTypingTime
+
+        if (lastTypingTime == 0L) {
+            // First typing event
+            lastTypingTime = currentTime
+            consistentTypingStartTime = currentTime
+            consecutiveTypingCount = 1
+            return false
+        }
+
+        if (timeSinceLastType <= typingIntervalThreshold) {
+            // Consistent typing
+            consecutiveTypingCount++
+
+            if (!isConsistentTyping && consecutiveTypingCount >= 5) {
+                // Started consistent typing (at least 5 consecutive keystrokes within threshold)
+                isConsistentTyping = true
+                consistentTypingStartTime = lastTypingTime
+            }
+
+            lastTypingTime = currentTime
+            return false
+        } else if (timeSinceLastType in pauseThreshold..maxPauseThreshold) {
+            // Pause detected within suspicious range
+            if (isConsistentTyping) {
+                val consistentTypingDuration = currentTime - consistentTypingStartTime
+                if (consistentTypingDuration >= consistentTypingThreshold) {
+                    // User typed consistently for at least 1 minute, then paused for 2-3 seconds
+                    reset()
+                    return true
+                }
+            }
+            reset()
+            return false
+        } else {
+            // Too long of a pause or irregular typing, reset
+            reset()
+            return false
+        }
+    }
+
+    private fun reset() {
+        isConsistentTyping = false
+        consecutiveTypingCount = 0
+        consistentTypingStartTime = 0
+        lastTypingTime = 0
+    }
+
+    fun getCurrentState(): String {
+        return if (isConsistentTyping) {
+            val duration = System.currentTimeMillis() - consistentTypingStartTime
+            "Consistent typing for ${TimeUnit.MILLISECONDS.toSeconds(duration)}s, $consecutiveTypingCount keystrokes"
+        } else {
+            "Not in consistent typing mode"
+        }
+    }
+}
 
 class MainActivity : ComponentActivity() {
     // Agent Declarations
@@ -46,6 +126,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var appUsageAgent: AppUsageAgent
     private lateinit var movementAgent: MovementAgent
     private lateinit var anomalyDetectionAgent: AnomalyDetectionAgent
+
+    // Typing pattern detector
+    private val typingPatternDetector = TypingPatternDetector()
 
     // ANOMALY SCORE THRESHOLD (Response Logic)
     private val anomalyThreshold = 0.015f
@@ -63,6 +146,9 @@ class MainActivity : ComponentActivity() {
     private var lastAnomaly by mutableStateOf<AnomalyEvent?>(null)
     private var lastForegroundApp by mutableStateOf("No data yet")
 
+    // Typing pattern state for UI
+    private var typingPatternState by mutableStateOf("Monitoring typing patterns...")
+
     // EventBus Subscribers
     @Subscribe
     fun onTouchEvent(event: TouchEvent) {
@@ -71,7 +157,17 @@ class MainActivity : ComponentActivity() {
 
     @Subscribe
     fun onTypingEvent(event: TypingEvent) {
-        runOnUiThread { typingCount++ }
+        runOnUiThread {
+            typingCount++
+            // Process typing event for pattern detection
+            val isSuspicious = typingPatternDetector.processTypingEvent()
+            typingPatternState = typingPatternDetector.getCurrentState()
+
+            if (isSuspicious) {
+                val reason = "Suspicious typing pattern detected: Consistent typing followed by unusual pause"
+                lastAnomaly = AnomalyEvent(reason, AnomalySeverity.HIGH)
+            }
+        }
     }
 
     @Subscribe(threadMode = ThreadMode.MAIN)
@@ -92,6 +188,13 @@ class MainActivity : ComponentActivity() {
     fun onMovementEvent(event: MovementEvent) {
         runOnUiThread { movementEventCount++ }
     }
+
+    // --- ADDED FOR TESTING ---
+    private fun triggerTestAnomaly() {
+        val testReason = "Test: Unusually slow typing detected"
+        lastAnomaly = AnomalyEvent(testReason, AnomalySeverity.MEDIUM)
+    }
+    // -------------------------
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -122,9 +225,12 @@ class MainActivity : ComponentActivity() {
                         lastForegroundApp = lastForegroundApp,
                         userProfile = userProfile,
                         lastAnomaly = lastAnomaly,
+                        typingPatternState = typingPatternState,
                         onRequestOverlayPermission = { requestOverlayPermission() },
                         onEnableAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                        onRequestUsagePermission = { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+                        onRequestUsagePermission = { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) },
+                        onTriggerTestAnomaly = { triggerTestAnomaly() },
+                        onClearAnomaly = { lastAnomaly = null }
                     )
                 }
             }
@@ -190,6 +296,7 @@ class MainActivity : ComponentActivity() {
         val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             appOps.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
         } else {
+            @Suppress("DEPRECATION")
             appOps.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, android.os.Process.myUid(), packageName)
         }
         return mode == AppOpsManager.MODE_ALLOWED
@@ -215,9 +322,12 @@ fun AgentDashboard(
     lastForegroundApp: String,
     userProfile: UserProfile,
     lastAnomaly: AnomalyEvent?,
+    typingPatternState: String, // Added typing pattern state
     onRequestOverlayPermission: () -> Unit,
     onEnableAccessibility: () -> Unit,
-    onRequestUsagePermission: () -> Unit
+    onRequestUsagePermission: () -> Unit,
+    onTriggerTestAnomaly: () -> Unit,
+    onClearAnomaly: () -> Unit
 ) {
     Column(
         modifier = modifier
@@ -232,6 +342,10 @@ fun AgentDashboard(
             modifier = Modifier.padding(bottom = 16.dp)
         )
         AnomalyCard(lastAnomaly)
+
+        // Typing Pattern Monitor Card
+        TypingPatternCard(typingPatternState)
+
         UserProfileCard(userProfile)
         Spacer(Modifier.height(16.dp))
         AgentStatusCard(
@@ -265,10 +379,60 @@ fun AgentDashboard(
             agentName = "Typing Agent",
             isPermissionGranted = isAccessibilityEnabled,
             eventCount = typingCount,
+            eventDetail = "Pattern: $typingPatternState",
             permissionText = "This agent requires the Accessibility Service to capture keystroke dynamics across all apps.",
             onGrantPermission = onEnableAccessibility,
             permissionButtonText = "Open Accessibility Settings"
         )
+
+        // --- ADDED FOR TESTING ---
+        Spacer(Modifier.height(24.dp))
+        Text("Prototype Testing", style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Button(onClick = onTriggerTestAnomaly, modifier = Modifier.weight(1f)) {
+                Text("Trigger Anomaly")
+            }
+            OutlinedButton(onClick = onClearAnomaly, modifier = Modifier.weight(1f)) {
+                Text("Clear Anomaly")
+            }
+        }
+        // -------------------------
+    }
+}
+
+@Composable
+fun TypingPatternCard(patternState: String) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 16.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFE3F2FD))
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = "Typing Pattern Monitor",
+                fontWeight = FontWeight.Bold,
+                color = Color(0xFF0D47A1),
+                style = MaterialTheme.typography.titleMedium
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = patternState,
+                color = Color(0xFF1976D2),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Alert: Consistent typing for 1min + 2-3s pause → Suspicious Activity",
+                color = Color(0xFF546E7A),
+                style = MaterialTheme.typography.bodySmall,
+                fontSize = 12.sp
+            )
+        }
     }
 }
 
@@ -279,7 +443,7 @@ fun AnomalyCard(anomaly: AnomalyEvent?) {
             AnomalySeverity.LOW -> Color(0xFFFFF3E0)
             AnomalySeverity.MEDIUM -> Color(0xFFFFE0B2)
             AnomalySeverity.HIGH -> Color(0xFFFFCDD2)
-            else -> MaterialTheme.colorScheme.surface
+            null -> MaterialTheme.colorScheme.surface
         }
         val textColor = when (anomaly?.severity) {
             AnomalySeverity.HIGH -> Color(0xFFB71C1C)
