@@ -1,8 +1,10 @@
 package com.example.multiagent
 
+import android.Manifest
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -45,6 +47,8 @@ import org.greenrobot.eventbus.Subscribe
 import org.greenrobot.eventbus.ThreadMode
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import java.util.concurrent.TimeUnit
 
 // Typing Pattern Detector class
@@ -53,21 +57,26 @@ class TypingPatternDetector {
     private var consistentTypingStartTime: Long = 0
     private var isConsistentTyping = false
     private var consecutiveTypingCount = 0
+    private var hasTriggeredForCurrentSession = false // ADD THIS FLAG
 
     // Thresholds in milliseconds
     private val consistentTypingThreshold = 60000L // 1 minute
     private val pauseThreshold = 2000L // 2 seconds
     private val maxPauseThreshold = 3000L // 3 seconds
     private val typingIntervalThreshold = 1000L // 1 second between keystrokes for consistent typing
+    private var lastNotificationTime: Long = 0 // ADD COOLDOWN TIMER
+    private val notificationCooldown = 30000L // 30 seconds cooldown
 
     fun processTypingEvent(currentTime: Long = System.currentTimeMillis()): Boolean {
         val timeSinceLastType = currentTime - lastTypingTime
+
 
         if (lastTypingTime == 0L) {
             // First typing event
             lastTypingTime = currentTime
             consistentTypingStartTime = currentTime
             consecutiveTypingCount = 1
+            hasTriggeredForCurrentSession = false // RESET FLAG
             return false
         }
 
@@ -79,18 +88,23 @@ class TypingPatternDetector {
                 // Started consistent typing (at least 5 consecutive keystrokes within threshold)
                 isConsistentTyping = true
                 consistentTypingStartTime = lastTypingTime
+                hasTriggeredForCurrentSession = false // RESET FLAG WHEN NEW SESSION STARTS
             }
 
             lastTypingTime = currentTime
             return false
         } else if (timeSinceLastType in pauseThreshold..maxPauseThreshold) {
             // Pause detected within suspicious range
-            if (isConsistentTyping) {
+            if (isConsistentTyping && !hasTriggeredForCurrentSession) {
                 val consistentTypingDuration = currentTime - consistentTypingStartTime
                 if (consistentTypingDuration >= consistentTypingThreshold) {
-                    // User typed consistently for at least 1 minute, then paused for 2-3 seconds
-                    reset()
-                    return true
+                    // Check cooldown period
+                    if (currentTime - lastNotificationTime > notificationCooldown) {
+                        hasTriggeredForCurrentSession = true
+                        lastNotificationTime = currentTime // UPDATE COOLDOWN TIMER
+                        reset()
+                        return true
+                    }
                 }
             }
             reset()
@@ -107,12 +121,14 @@ class TypingPatternDetector {
         consecutiveTypingCount = 0
         consistentTypingStartTime = 0
         lastTypingTime = 0
+        // DON'T reset hasTriggeredForCurrentSession here - we want to keep it until new session
     }
 
     fun getCurrentState(): String {
         return if (isConsistentTyping) {
             val duration = System.currentTimeMillis() - consistentTypingStartTime
-            "Consistent typing for ${TimeUnit.MILLISECONDS.toSeconds(duration)}s, $consecutiveTypingCount keystrokes"
+            val triggeredStatus = if (hasTriggeredForCurrentSession) " (Already triggered)" else ""
+            "Consistent typing for ${TimeUnit.MILLISECONDS.toSeconds(duration)}s, $consecutiveTypingCount keystrokes$triggeredStatus"
         } else {
             "Not in consistent typing mode"
         }
@@ -260,6 +276,17 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         updatePermissionsStatus()
         startAllAgents()
+        // Request notification permission for Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    123
+                )
+            }
+        }
     }
 
     override fun onPause() {

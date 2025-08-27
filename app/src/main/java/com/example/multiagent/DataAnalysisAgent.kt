@@ -1,14 +1,22 @@
 package com.example.multiagent
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 import android.view.InputDevice
 import android.view.MotionEvent
+import androidx.core.app.NotificationCompat
+import com.example.multiagent.agents.AppUsageEvent
+import com.example.multiagent.agents.EventType
 import com.example.multiagent.agents.MovementEvent
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.greenrobot.eventbus.EventBus
 import org.greenrobot.eventbus.Subscribe
+import java.util.Calendar
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.pow
@@ -46,10 +54,20 @@ class DataAnalysisAgent(context: Context) {
     private val _userProfile = MutableStateFlow(UserProfile())
     val userProfile = _userProfile.asStateFlow()
 
+    // --- ADD NOTIFICATION CONSTANTS AND CONTEXT ---
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "anomaly_alerts_channel"
+        const val NOTIFICATION_ID = 1
+    }
+
+    private val appContext: Context = context.applicationContext
+    private var notificationIdCounter = 1000 // Start from 1000 to avoid conflicts
+
     init {
         loadInitialData()
         recalculateProfile()
         EventBus.getDefault().register(this)
+        createNotificationChannel() // Create channel on initialization
     }
 
     private fun loadInitialData() {
@@ -87,6 +105,31 @@ class DataAnalysisAgent(context: Context) {
             recalculateProfile()
             if (_userProfile.value.isBaselineEstablished) {
                 checkForMovementAnomalies(magnitude)
+            }
+        }
+    }
+
+    @Subscribe
+    fun onAppUsageEvent(event: AppUsageEvent) {
+        // Check if the app is a financial app
+        val isFinancialApp = event.packageName.contains("bank", ignoreCase = true) ||
+                event.packageName.contains("chase", ignoreCase = true) ||
+                event.packageName.contains("paypal", ignoreCase = true) ||
+                event.packageName.contains("wellsfargo", ignoreCase = true) ||
+                event.packageName.contains("investment", ignoreCase = true) ||
+                event.packageName.contains("crypto", ignoreCase = true) ||
+                event.packageName.contains("capitalone", ignoreCase = true) ||
+                event.packageName.contains("venmo", ignoreCase = true) ||
+                event.packageName.contains("zelle", ignoreCase = true)
+
+        if (isFinancialApp && event.eventType == EventType.START) {
+            val currentHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+            // Define "unusual hours" as between 1 AM and 5 AM
+            if (currentHour in 1..5) {
+                val reason = "Suspicious: Accessing financial app (${
+                    event.packageName.substringAfterLast('.')
+                }) at unusual hour ($currentHour:00)"
+                postAnomaly(reason, AnomalySeverity.HIGH)
             }
         }
     }
@@ -238,9 +281,84 @@ class DataAnalysisAgent(context: Context) {
         }
     }
 
+    // --- MODIFIED POSTANOMALY METHOD WITH NOTIFICATIONS FOR ALL ANOMALIES ---
     private fun postAnomaly(reason: String, severity: AnomalySeverity) {
         Log.e("AnomalyDetector", "REACTION TRIGGERED: $reason, Severity: $severity")
         EventBus.getDefault().post(AnomalyEvent(reason, severity))
+
+        // Send push notification for ALL types of anomalies
+        sendNotification(reason, severity)
+    }
+
+    // --- NEW NOTIFICATION METHODS ---
+    private fun sendNotification(reason: String, severity: AnomalySeverity) {
+        // Ensure notification channel exists
+        if (!isNotificationChannelCreated()) {
+            Log.d("NotificationDebug", "Creating notification channel")
+
+            createNotificationChannel()
+        }
+
+        // Use a unique ID for each notification so they don't overwrite each other
+        val uniqueNotificationId = notificationIdCounter++
+        Log.d("NotificationDebug", "Using notification ID: $uniqueNotificationId")
+
+        // Intent to open the app when notification is tapped
+        val intent = Intent(appContext, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            appContext, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Choose appropriate icon and color based on severity
+        val (icon, color) = when (severity) {
+            AnomalySeverity.HIGH -> Pair(android.R.drawable.ic_dialog_alert, android.R.color.holo_red_light)
+            AnomalySeverity.MEDIUM -> Pair(android.R.drawable.ic_dialog_info, android.R.color.holo_orange_light)
+            AnomalySeverity.LOW -> Pair(android.R.drawable.ic_dialog_info, android.R.color.holo_blue_light)
+        }
+
+        // Build the notification
+        // Build the notification
+        val notification = NotificationCompat.Builder(appContext, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(icon)
+            .setColor(appContext.resources.getColor(color))
+            .setContentTitle("⚠️ Suspicious Activity Detected")
+            .setContentText(reason)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(false) // Changed to false to always alert
+            .setCategory(NotificationCompat.CATEGORY_ALARM) // Important category
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // Show on lock screen
+            .build()
+
+        // Send the notification
+        val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(uniqueNotificationId, notification)
+    }
+
+    private fun isNotificationChannelCreated(): Boolean {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            return notificationManager.getNotificationChannel(NOTIFICATION_CHANNEL_ID) != null
+        }
+        return true // For pre-Oreo, channels don't exist
+    }
+    private fun createNotificationChannel() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val name = "Anomaly Alerts"
+            val descriptionText = "Notifications for suspicious activity detection"
+            val importance = NotificationManager.IMPORTANCE_HIGH // Makes it a heads-up notification
+            val channel = NotificationChannel(NOTIFICATION_CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+                enableVibration(true)
+                setShowBadge(true)
+            }
+            val notificationManager = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
     }
 
     private fun calculateStdDev(data: List<Double>, mean: Double): Double {
